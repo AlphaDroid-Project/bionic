@@ -43,6 +43,7 @@ __BEGIN_DECLS
 #define INET_ADDRSTRLEN 16
 
 typedef uint16_t in_port_t;
+typedef uint32_t in_addr_t;
 
 int bindresvport(int __fd, struct sockaddr_in* _Nullable __sin);
 
