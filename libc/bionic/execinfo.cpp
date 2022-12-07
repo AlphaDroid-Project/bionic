@@ -26,7 +26,9 @@
  * SUCH DAMAGE.
  */
 
+#include <async_safe/log.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <execinfo.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -37,6 +39,21 @@
 #include <unwind.h>
 
 #include "private/ScopedFd.h"
+
+/**
+ * @brief This function writes char* arrays at the begining of buffer.
+ * Real strings should be written from buffer + arr_size * sizeof(void*).
+ * Caller should make the buffer large enough.
+ *
+ * @param buffer Buffer contains pointer and data.
+ * @param arr_size Array size. Frame size in this file.
+ * @param str_size_total Total size of strings.
+ * @return int 0 if OK. Negative if error occurred.
+ */
+static int write_str_arr(char* buffer, size_t arr_size, size_t str_size_total);
+
+template <typename T>
+static int backtrace_symbols_write(void* const* buffer, int size, T&& write_fn);
 
 struct StackState {
   void** frames;
@@ -95,70 +112,103 @@ int backtrace(void** buffer, int size) {
   return state.cur_frame;
 }
 
-char** backtrace_symbols(void* const* buffer, int size) {
-  if (size <= 0) {
-    return nullptr;
+class FunctorWriteFd {
+ public:
+  explicit FunctorWriteFd(int _fd) : fd(_fd) {}
+
+  bool operator()(const char* s) { return write(fd, s, strlen(s)) >= 0; }
+
+ private:
+  int fd;
+};
+
+/**
+ * @brief  Write strings to an auto-enlarged buffer.
+ */
+class FunctorWriteDynamicBuffer {
+ public:
+  const static size_t INIT_BUFSIZE = 512;
+  explicit FunctorWriteDynamicBuffer(size_t start_offset = 0)
+      : mBuf(nullptr), mBufSize(INIT_BUFSIZE + start_offset), mPos(nullptr) {
+    mBuf = static_cast<char*>(malloc(mBufSize));
+    mBuf[mBufSize - 1] = '\0';
+    mPos = mBuf + start_offset;
   }
-  // Do this calculation first in case the user passes in a bad value.
+
+  FunctorWriteDynamicBuffer(FunctorWriteDynamicBuffer&& other) {
+    mBuf = other.mBuf;
+    mBufSize = other.mBufSize;
+    mPos = other.mPos;
+    other.mBuf = other.mPos = nullptr;
+    other.mBufSize = 0;
+  }
+
+  bool operator()(const char* s) {
+    size_t len_to_write = strlen(s);
+    size_t bytes_left = mBuf + mBufSize - mPos - 1;
+    size_t curr_size = GetSizeWrite();
+    if (len_to_write > bytes_left) {
+      // Ensure enlarged buffer is large enough.
+      mBufSize = (mBufSize + (len_to_write - bytes_left)) << 1;
+      void* new_buf = realloc(mBuf, mBufSize);
+      if (!new_buf) {
+        error_log("Realloc failed. Maybe out of memory");
+        return false;
+      }
+      mBuf = static_cast<char*>(new_buf);
+      // mBuf may be changed after realloc so we re-calculate mPos based on mBuf.
+      mPos = mBuf + curr_size;
+    }
+    strncat(mPos, s, len_to_write);
+    // Last '\0' appended by strncat will be overriddn at next invocation.
+    mPos += len_to_write;
+    return true;
+  }
+
+  char* GetBuffer() { return mBuf; }
+
+  size_t GetSizeWrite() const { return mPos - mBuf; }
+
+  void Destroy() {
+    if (mBuf) {
+      free(mBuf);
+      mPos = mBuf = nullptr;
+      mBufSize = 0;
+    }
+  }
+
+  // Disallow copy and assign.
+  FunctorWriteDynamicBuffer(FunctorWriteDynamicBuffer& other) = delete;
+  FunctorWriteDynamicBuffer operator=(FunctorWriteDynamicBuffer& other) = delete;
+
+ private:
+  char* mBuf;
+  size_t mBufSize;
+  char* mPos;
+};
+
+char** backtrace_symbols(void* const* buffer, int size) {
   size_t ptr_size;
   if (__builtin_mul_overflow(sizeof(char*), size, &ptr_size)) {
+    error_log("Overflow when calculate ptr_size!");
     return nullptr;
   }
 
-  ScopedFd fd(memfd_create("backtrace_symbols_fd", MFD_CLOEXEC));
-  if (fd.get() == -1) {
-    return nullptr;
-  }
-  backtrace_symbols_fd(buffer, size, fd.get());
-
-  // Get the size of the file.
-  off_t file_size = lseek(fd.get(), 0, SEEK_END);
-  if (file_size <= 0) {
+  FunctorWriteDynamicBuffer functor(ptr_size);
+  int retval = backtrace_symbols_write(buffer, size, functor);
+  if (retval < 0) {
+    functor.Destroy();
+    error_log("backtrace_symbols_write(dynamic) failed. retval: %d", retval);
     return nullptr;
   }
 
-  // The interface for backtrace_symbols indicates that only the single
-  // returned pointer must be freed by the caller. Therefore, allocate a
-  // buffer that includes the memory for the strings and all of the pointers.
-  // Add one byte at the end just in case the file didn't end with a '\n'.
-  size_t symbol_data_size;
-  if (__builtin_add_overflow(ptr_size, file_size, &symbol_data_size) ||
-      __builtin_add_overflow(symbol_data_size, 1, &symbol_data_size)) {
+  size_t raw_size = functor.GetSizeWrite();
+  if (write_str_arr(functor.GetBuffer(), size, raw_size) < 0) {
+    functor.Destroy();
     return nullptr;
   }
 
-  uint8_t* symbol_data = reinterpret_cast<uint8_t*>(malloc(symbol_data_size));
-  if (symbol_data == nullptr) {
-    return nullptr;
-  }
-
-  // Copy the string data into the buffer.
-  char* cur_string = reinterpret_cast<char*>(&symbol_data[ptr_size]);
-  // If this fails, the read won't read back the correct number of bytes.
-  lseek(fd.get(), 0, SEEK_SET);
-  ssize_t num_read = read(fd.get(), cur_string, file_size);
-  fd.reset(-1);
-  if (num_read != file_size) {
-    free(symbol_data);
-    return nullptr;
-  }
-
-  // Make sure the last character in the file is '\n'.
-  if (cur_string[file_size] != '\n') {
-    cur_string[file_size++] = '\n';
-  }
-
-  for (int i = 0; i < size; i++) {
-    (reinterpret_cast<char**>(symbol_data))[i] = cur_string;
-    cur_string = strchr(cur_string, '\n');
-    if (cur_string == nullptr) {
-      free(symbol_data);
-      return nullptr;
-    }
-    cur_string[0] = '\0';
-    cur_string++;
-  }
-  return reinterpret_cast<char**>(symbol_data);
+  return reinterpret_cast<char**>(functor.GetBuffer());
 }
 
 // This function should do no allocations if possible.
@@ -167,21 +217,57 @@ void backtrace_symbols_fd(void* const* buffer, int size, int fd) {
     return;
   }
 
+  int retval = backtrace_symbols_write(buffer, size, FunctorWriteFd(fd));
+  if (retval < 0) {
+    error_log("backtrace_symbols_write(fd) failed. retval: %d", retval);
+  }
+}
+
+static int write_str_arr(char* symbol_data, size_t arr_size, size_t file_size) {
+  size_t ptr_size = sizeof(char*) * arr_size;
+  char* cur_string = reinterpret_cast<char*>(&symbol_data[ptr_size]);
+
+  // Make sure the last character is '\n'.
+  if (cur_string[file_size] != '\n') {
+    cur_string[file_size++] = '\n';
+  }
+
+  for (size_t i = 0; i < arr_size; i++) {
+    (reinterpret_cast<char**>(symbol_data))[i] = cur_string;
+    cur_string = strchr(cur_string, '\n');
+    if (cur_string == nullptr) {
+      return -1;
+    }
+    cur_string[0] = '\0';
+    cur_string++;
+  }
+  return 0;
+}
+
+template <typename T>
+static int backtrace_symbols_write(void* const* buffer, int size, T&& write_fn) {
+  const int BUFSIZE = 512;
+  char buf[BUFSIZE];
   for (int frame_num = 0; frame_num < size; frame_num++) {
     void* address = buffer[frame_num];
     Dl_info info;
     if (dladdr(address, &info) != 0) {
       if (info.dli_fname != nullptr) {
-        write(fd, info.dli_fname, strlen(info.dli_fname));
+        if (!write_fn(info.dli_fname)) return -1;
       }
       if (info.dli_sname != nullptr) {
-        dprintf(fd, "(%s+0x%" PRIxPTR ") ", info.dli_sname,
-                reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(info.dli_saddr));
+        snprintf(
+            buf, BUFSIZE, "(%s+0x%" PRIxPTR ") ", info.dli_sname,
+            reinterpret_cast<uintptr_t>(address) - reinterpret_cast<uintptr_t>(info.dli_saddr));
+        if (!write_fn(buf)) return -1;
       } else {
-        dprintf(fd, "(+%p) ", info.dli_saddr);
+        snprintf(buf, BUFSIZE, "(+%p) ", info.dli_saddr);
+        write_fn(buf);
       }
     }
 
-    dprintf(fd, "[%p]\n", address);
+    snprintf(buf, BUFSIZE, "[%p]\n", address);
+    if (!write_fn(buf)) return -1;
   }
+  return 0;
 }

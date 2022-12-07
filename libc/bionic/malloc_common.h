@@ -83,14 +83,3 @@ static inline const MallocDispatch* GetDispatchTable() {
 static inline const MallocDispatch* GetDefaultDispatchTable() {
   return atomic_load_explicit(&__libc_globals->default_dispatch_table, memory_order_acquire);
 }
-
-// =============================================================================
-// Log functions
-// =============================================================================
-#define error_log(format, ...)  \
-    async_safe_format_log(ANDROID_LOG_ERROR, "libc", (format), ##__VA_ARGS__ )
-#define info_log(format, ...)  \
-    async_safe_format_log(ANDROID_LOG_INFO, "libc", (format), ##__VA_ARGS__ )
-#define warning_log(format, ...)  \
-    async_safe_format_log(ANDROID_LOG_WARN, "libc", (format), ##__VA_ARGS__ )
-// =============================================================================

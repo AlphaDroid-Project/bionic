@@ -73,4 +73,20 @@ int async_safe_format_log(int priority, const char* tag, const char* fmt, ...) _
 int async_safe_format_log_va_list(int priority, const char* tag, const char* fmt, va_list ap);
 int async_safe_write_log(int priority, const char* tag, const char* msg);
 
+#ifndef LOG_TAG
+#define LOG_TAG "libc"
+#endif
+
+#define debug_log(format, ...) \
+  async_safe_format_log(ANDROID_LOG_DEBUG, LOG_TAG, (format), ##__VA_ARGS__)
+
+#define info_log(format, ...) \
+  async_safe_format_log(ANDROID_LOG_INFO, LOG_TAG, (format), ##__VA_ARGS__)
+
+#define warning_log(format, ...) \
+  async_safe_format_log(ANDROID_LOG_WARN, LOG_TAG, (format), ##__VA_ARGS__)
+
+#define error_log(format, ...) \
+  async_safe_format_log(ANDROID_LOG_ERROR, LOG_TAG, (format), ##__VA_ARGS__)
+
 __END_DECLS
