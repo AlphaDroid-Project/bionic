@@ -187,7 +187,9 @@ bool ElfReader::Load(address_space_params* address_space) {
   }
   if (reserveSuccess && !did_load_) {
     if (load_start_ != nullptr && load_size_ != 0) {
-      munmap(load_start_, load_size_);
+      if (!mapped_by_caller_) {
+        munmap(load_start_, load_size_);
+      }
     }
   }
 
