@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 The Android Open Source Project
+ * Copyright (C) 2008 The Android Open Source Project
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -26,19 +26,12 @@
  * SUCH DAMAGE.
  */
 
-#include <string>
+// Prototype: void *memcpy (void *dst, const void *src, size_t count).
 
-#include <android-base/file.h>
+#include <private/bionic_asm.h>
 
-#include "linker.h"
+ENTRY(__memcpy)
+  #include "memcpy_base.S"
+END(__memcpy)
 
-bool get_transparent_hugepages_supported() {
-  static bool transparent_hugepages_supported = []() {
-    std::string enabled;
-    if (!android::base::ReadFileToString("/sys/kernel/mm/transparent_hugepage/enabled", &enabled)) {
-      return false;
-    }
-    return enabled.find("[never]") == std::string::npos;
-  }();
-  return transparent_hugepages_supported;
-}
+NOTE_GNU_PROPERTY()

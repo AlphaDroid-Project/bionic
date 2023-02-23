@@ -904,14 +904,14 @@ class ZipArchiveCache {
   ZipArchiveCache() {}
   ~ZipArchiveCache();
 
-  bool get_or_open(const char* zip_path, ZipArchiveHandle* handle);
+  bool get_or_open(const char* zip_path, int zip_fd, ZipArchiveHandle* handle);
  private:
   DISALLOW_COPY_AND_ASSIGN(ZipArchiveCache);
 
   std::unordered_map<std::string, ZipArchiveHandle> cache_;
 };
 
-bool ZipArchiveCache::get_or_open(const char* zip_path, ZipArchiveHandle* handle) {
+bool ZipArchiveCache::get_or_open(const char* zip_path, int zip_fd, ZipArchiveHandle* handle) {
   std::string key(zip_path);
 
   auto it = cache_.find(key);
@@ -920,7 +920,7 @@ bool ZipArchiveCache::get_or_open(const char* zip_path, ZipArchiveHandle* handle
     return true;
   }
 
-  int fd = TEMP_FAILURE_RETRY(open(zip_path, O_RDONLY | O_CLOEXEC));
+  int fd = zip_fd != -1 ? dup(zip_fd) : TEMP_FAILURE_RETRY(open(zip_path, O_RDONLY | O_CLOEXEC));
   if (fd == -1) {
     return false;
   }
@@ -971,13 +971,19 @@ static int open_library_in_zipfile(ZipArchiveCache* zip_archive_cache,
 
   const char* zip_path = buf;
   const char* file_path = &buf[separator - path + 2];
-  int fd = TEMP_FAILURE_RETRY(open(zip_path, O_RDONLY | O_CLOEXEC));
+  int fd;
+  if (!strncmp("/proc/self/fd/", zip_path, strlen("/proc/self/fd/")) &&
+        sscanf(zip_path, "/proc/self/fd/%d", &fd) == 1) {
+    fd = dup(fd);
+  } else {
+    fd = TEMP_FAILURE_RETRY(open(zip_path, O_RDONLY | O_CLOEXEC));
+  }
   if (fd == -1) {
     return -1;
   }
 
   ZipArchiveHandle handle;
-  if (!zip_archive_cache->get_or_open(zip_path, &handle)) {
+  if (!zip_archive_cache->get_or_open(zip_path, fd, &handle)) {
     // invalid zip-file (?)
     close(fd);
     return -1;
@@ -992,7 +998,7 @@ static int open_library_in_zipfile(ZipArchiveCache* zip_archive_cache,
   }
 
   // Check if it is properly stored
-  if (entry.method != kCompressStored || (entry.offset % PAGE_SIZE) != 0) {
+  if (entry.method != kCompressStored || (entry.offset % page_size()) != 0) {
     close(fd);
     return -1;
   }
@@ -1201,7 +1207,7 @@ static bool load_library(android_namespace_t* ns,
          "load_library(ns=%s, task=%s, flags=0x%x, realpath=%s, search_linked_namespaces=%d)",
          ns->get_name(), name, rtld_flags, realpath.c_str(), search_linked_namespaces);
 
-  if ((file_offset % PAGE_SIZE) != 0) {
+  if ((file_offset % page_size()) != 0) {
     DL_OPEN_ERR("file offset for the library \"%s\" is not page-aligned: %" PRId64, name, file_offset);
     return false;
   }
