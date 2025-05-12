@@ -1872,6 +1872,7 @@ cc_library_headers {
         "//external/scudo",
         "//system/core/property_service/libpropertyinfoparser",
         "//system/extras/toolchain-extras",
+        "//external/jemalloc-new",
     ],
 
     stl: "none",
